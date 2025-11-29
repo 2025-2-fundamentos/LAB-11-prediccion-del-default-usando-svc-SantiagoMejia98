@@ -95,3 +95,130 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+import pandas as pd
+import numpy as np
+import os
+from sklearn.model_selection import GridSearchCV
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.svm import SVC
+from sklearn.decomposition import PCA
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.metrics import (
+  precision_score,
+  balanced_accuracy_score,
+  recall_score,
+  f1_score,
+  confusion_matrix
+)
+import json
+import gzip
+import pickle
+
+# Paso 1
+train = pd.read_csv("files/input/train_data.csv.zip")
+test = pd.read_csv("files/input/test_data.csv.zip")
+
+train = train.rename(columns={"default payment next month": "default"})
+test = test.rename(columns={"default payment next month": "default"})
+
+train = train.drop(columns=["ID"])
+test = test.drop(columns=["ID"])
+
+train = train.dropna()
+test = test.dropna()
+
+train.loc[train["EDUCATION"] > 4, "EDUCATION"] = 4
+test.loc[test["EDUCATION"] > 4, "EDUCATION"] = 4
+
+# Paso 2
+X_train = train.drop(columns="default")
+y_train = train["default"]
+
+X_test = test.drop(columns="default")
+y_test = test["default"]
+
+# Paso 3
+cat = ["SEX", "EDUCATION", "MARRIAGE"]
+num = [col for col in X_train.columns if col not in cat]
+
+pre = ColumnTransformer(
+  transformers=[("cat", OneHotEncoder(handle_unknown="ignore"), cat),
+                ("num", StandardScaler(), num)]
+)
+
+pipe = Pipeline(
+    steps=[
+        ("prep", pre),
+        ("pca", PCA()),
+        ("select", SelectKBest(score_func=f_classif)),
+        ("svc", SVC())
+])
+
+# Paso 4
+params = {
+    'pca__n_components': [21],
+    'select__k': [12],
+    'svc__C': [0.8],
+    'svc__kernel': ['rbf'],
+    'svc__gamma': [0.1],
+}
+
+grid = GridSearchCV(
+  estimator=pipe,
+  param_grid=params,
+  cv=10,
+  scoring="balanced_accuracy",
+  n_jobs=-1
+)
+
+grid.fit(X_train, y_train)
+
+# Paso 5
+os.makedirs("files/models", exist_ok=True)
+
+with gzip.open("files/models/model.pkl.gz", "wb") as f:
+  pickle.dump(grid, f)
+
+# Paso 6
+def calc_metrics(name, y_true, y_pred):
+    return {
+    "type": "metrics",
+    "dataset": name,
+    "precision": float(round(precision_score(y_true, y_pred), 3)),
+    "balanced_accuracy": float(round(balanced_accuracy_score(y_true, y_pred), 3)),
+    "recall": float(round(recall_score(y_true, y_pred), 3)),
+    "f1_score": float(round(f1_score(y_true, y_pred), 3))
+  }
+
+m_train = calc_metrics("train", y_train, grid.predict(X_train))
+m_test = calc_metrics("test", y_test, grid.predict(X_test))
+
+# Paso 7
+def cm_dict(name, y_true, y_pred):
+  tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+  return {
+    "type": "cm_matrix",
+    "dataset": name,
+    "true_0": {
+      "predicted_0": int(tn),
+      "predicted_1": int(fp)
+    },
+    "true_1": {
+      "predicted_0": int(fn),
+      "predicted_1": int(tp)
+    }
+  }
+
+cm_train = cm_dict("train", y_train, grid.predict(X_train))
+cm_test = cm_dict("test", y_test, grid.predict(X_test))
+
+out = [m_train, m_test, cm_train, cm_test]
+
+os.makedirs("files/output", exist_ok=True)
+
+with open("files/output/metrics.json", "w") as f:
+  for row in out:
+    f.write(json.dumps(row) + "\n")
